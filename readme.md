@@ -15,6 +15,6 @@ benchmarked against Black–Scholes delta hedging.
   loss (−3.68) exceeds the option premium (2.29), and risk starts increasing again.
 - BS delta ignores costs and trades identically for any c and this is the gap
   the neural network should close.
-# Stage 4: Neural network hedger (MLP, 1185 params) trained only on simulated
+# Stage 4 findings - Neural network hedger (MLP, 1185 params) trained only on simulated
   paths recovers the Black–Scholes delta: mean position error 0.009,
   out-of-sample P&L std 0.369 vs 0.358 for BS delta.
