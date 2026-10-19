@@ -1,0 +1,479 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\IfFileExists{lmodern.sty}{\usepackage[T1]{fontenc}\usepackage{lmodern}}{}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=4pt}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\CVaR}{\operatorname{CVaR}}
+\newcommand{\VaR}{\operatorname{VaR}}
+\newcommand{\PnL}{\mathrm{PnL}}
+
+% Include a figure only if the file exists (keeps the document compilable without figures)
+\newcommand{\maybefigure}[3]{%
+  \IfFileExists{#1}{%
+    \begin{figure}[H]
+      \centering
+      \includegraphics[width=#2\textwidth]{#1}
+      \caption{#3}
+    \end{figure}%
+  }{%
+    \begin{center}\fbox{\parbox{0.8\textwidth}{\centering\small Figure \texttt{\detokenize{#1}} not found.\\ #3}}\end{center}%
+  }%
+}
+
+\title{\textbf{Deep Hedging under Transaction Costs}\\[4pt]
+\large CVaR-optimal neural hedging benchmarked against\\ Black--Scholes delta and no-trade-band strategies}
+\author{Daniil Hutsol\\ \small SGH Warsaw School of Economics}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study the hedging of a short European call option under proportional transaction costs.
+A recurrent neural-network policy, which observes the moneyness, the remaining time to
+maturity and its current position, is trained end-to-end through a Monte Carlo market
+simulator to minimise the Conditional Value-at-Risk (CVaR) of the terminal profit and loss.
+Without costs, the network recovers the Black--Scholes delta from simulated data alone.
+With 1\% proportional costs, it reduces $\CVaR_{95\%}$ out-of-sample by 41\% relative to
+Black--Scholes delta hedging and by 8\% relative to the best tuned classical no-trade-band
+strategy, a gap of roughly twelve times the seed-to-seed standard deviation. We document every
+building block against theory and discuss the limitations of the simulated setting.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{Introduction}
+%=====================================================================
+
+A dealer who sells an option is exposed to the movements of the underlying and reduces this
+exposure by trading the underlying asset. In the frictionless Black--Scholes world the optimal
+strategy is known in closed form: hold $\Delta = \partial C/\partial S$ shares and rebalance
+continuously. In practice two assumptions fail. Rebalancing is discrete, which leaves a residual
+hedging error, and every trade costs money, which makes frequent rebalancing expensive. Under
+proportional transaction costs there is no exact closed-form optimal strategy; only asymptotic
+results for small costs are available~\cite{whalley1997,leland1985}.
+
+Deep hedging~\cite{buehler2019} replaces the analytical hedging rule by a neural network and
+trains it directly on simulated market paths to minimise a chosen risk measure of the hedged
+position. This report reproduces the core findings of that approach and extends the comparison
+with classical benchmarks. Our contributions are:
+\begin{enumerate}
+  \item a fully validated pipeline: market simulator, pricing, hedging engine and training loop,
+        each checked against analytical results;
+  \item a CVaR-trained recurrent hedging network that accounts for its current position;
+  \item a comparison not only with naive Black--Scholes delta hedging, but also with two
+        classical cost-aware strategies (constant and Whalley--Wilmott no-trade bands) whose
+        parameters are tuned on the training data;
+  \item a robustness analysis over several training seeds.
+\end{enumerate}
+
+%=====================================================================
+\section{Market model}
+%=====================================================================
+
+\subsection{Geometric Brownian motion}
+
+The underlying price follows a geometric Brownian motion
+\begin{equation}
+  dS_t = \mu S_t\,dt + \sigma S_t\,dW_t ,
+\end{equation}
+where $\mu$ is the drift, $\sigma$ the volatility and $W_t$ a standard Brownian motion.
+Its solution is
+\begin{equation}
+  S_t = S_0 \exp\!\Big( \big(\mu - \tfrac{1}{2}\sigma^2\big) t + \sigma W_t \Big),
+\end{equation}
+so $\log S_t$ is normally distributed with mean $\log S_0 + (\mu - \sigma^2/2)t$ and variance
+$\sigma^2 t$. The correction $-\sigma^2/2$ ensures $\E[S_t] = S_0 e^{\mu t}$, since for
+$X \sim \mathcal{N}(m, v)$ one has $\E[e^X] = e^{m + v/2}$.
+
+\subsection{Exact discretisation}
+
+On a grid $t_k = k\,\Delta t$, $\Delta t = T/N$, paths are generated exactly, without
+discretisation error:
+\begin{equation}
+  S_{k+1} = S_k \exp\!\Big( \big(\mu - \tfrac{1}{2}\sigma^2\big)\Delta t + \sigma\sqrt{\Delta t}\, Z_{k+1} \Big),
+  \qquad Z_{k+1} \overset{\text{iid}}{\sim} \mathcal{N}(0,1).
+\end{equation}
+The noise scales with $\sqrt{\Delta t}$ because variances of independent increments add up:
+$N$ steps of variance $s^2$ must give the total variance $\sigma^2 T$, hence
+$s^2 = \sigma^2 \Delta t$. Implementation-wise, the log-increments are summed with a cumulative
+sum along the time axis, which vectorises the simulation over all paths.
+
+\subsection{Parameters and validation}
+
+Unless stated otherwise we use $S_0 = K = 100$, $\sigma = 0.2$, $\mu = r = 0$,
+$T = 30/365$ and $N = 30$ daily rebalancing dates. Training uses $100{,}000$ paths
+(seed 42); all reported results are computed on $100{,}000$ independent test paths (seed 1).
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Quantity & Theory & Simulation & Note \\
+\midrule
+$\E[S_T]$, $\mu = 0$        & 100.000 & 100.020 & difference $\approx 1$ standard error \\
+$\E[S_T]$, $\mu = 0.5$      & 104.195 & 104.216 & checks the drift term \\
+$\Var(\log S_T)$            & 0.003288 & 0.003258 & difference $\approx 2$ standard errors \\
+\bottomrule
+\end{tabular}
+\caption{Validation of the simulator against closed-form moments.}
+\end{table}
+
+\maybefigure{../figures/geometric_brownian_simulation.png}{0.8}{Twenty simulated paths and the
+5--95\% band of $100{,}000$ paths. The band widens as $\sqrt{t}$ and is slightly skewed upwards,
+reflecting the log-normal distribution.}
+
+%=====================================================================
+\section{Pricing and the Black--Scholes delta}
+%=====================================================================
+
+With $r = 0$ the fair price of a European call is its expected payoff under the risk-neutral
+measure, which coincides with the model with $\mu = 0$:
+\begin{equation}
+  C = \E\big[(S_T - K)^+\big] = S\,N(d_1) - K\,N(d_2),
+\end{equation}
+\begin{equation}
+  d_1 = \frac{\ln(S/K) + \tfrac12 \sigma^2 \tau}{\sigma\sqrt{\tau}}, \qquad d_2 = d_1 - \sigma\sqrt{\tau},
+\end{equation}
+where $\tau = T - t$ is the remaining time to maturity and $N(\cdot)$ is the standard normal
+distribution function. The Black--Scholes delta and gamma are
+\begin{equation}
+  \Delta = \frac{\partial C}{\partial S} = N(d_1), \qquad
+  \Gamma = \frac{\partial^2 C}{\partial S^2} = \frac{N'(d_1)}{S\,\sigma\sqrt{\tau}} .
+\end{equation}
+Setting $r = 0$ is equivalent to working in discounted units and follows~\cite{buehler2019}.
+
+For the at-the-money option of our setup $C = 2.2872$ and $\Delta = 0.5114$. The price matches the
+Monte Carlo estimate $2.2896$ (difference below one quarter of a standard error), and the delta
+matches the central finite difference $\big(C(S+h) - C(S-h)\big)/(2h)$ to eleven digits.
+
+%=====================================================================
+\section{The hedging problem}
+%=====================================================================
+
+\subsection{Profit and loss}
+
+The dealer sells the call for the premium $p_0$ and holds $\delta_k$ units of the underlying on
+$[t_k, t_{k+1})$, $k = 0, \dots, N-1$. With proportional costs $c$ per unit of traded notional,
+the terminal profit and loss is
+\begin{equation}\label{eq:pnl}
+  \PnL = p_0 - (S_N - K)^+ + \sum_{k=0}^{N-1} \delta_k \,(S_{k+1} - S_k)
+       - \sum_{k=0}^{N-1} c\, S_k \,\lvert \delta_k - \delta_{k-1} \rvert ,
+  \qquad \delta_{-1} = 0 .
+\end{equation}
+The four terms are the premium, the option payoff, the gains of the hedge and the trading costs.
+The turnover $\sum_k \lvert \delta_k - \delta_{k-1}\rvert$ measures the total number of shares traded.
+We do not charge costs for unwinding the hedge at maturity, since the hedge ratio is then close to
+0 or 1.
+
+\subsection{Risk measures}
+
+Let $L = -\PnL$ denote the loss. Besides the mean and the standard deviation we use
+\begin{equation}
+  \VaR_\alpha(L) = \inf\{\, \ell : \mathbb{P}(L \le \ell) \ge \alpha \,\}, \qquad
+  \CVaR_\alpha(L) = \E\big[\,L \mid L \ge \VaR_\alpha(L)\,\big],
+\end{equation}
+the average loss in the worst $(1-\alpha)$ fraction of scenarios, with $\alpha = 0.95$.
+Unlike the variance, CVaR only penalises the tail of losses and does not penalise gains.
+
+\subsection{The Rockafellar--Uryasev representation}
+
+Optimising CVaR directly requires sorting, which is inconvenient for gradient-based training.
+Rockafellar and Uryasev~\cite{rockafellar2000} showed that
+\begin{equation}\label{eq:ru}
+  \CVaR_\alpha(L) = \min_{w \in \mathbb{R}} \Big\{\, w + \frac{1}{1-\alpha}\, \E\big[(L - w)^+\big] \Big\},
+\end{equation}
+with the minimum attained at $w = \VaR_\alpha(L)$. The objective inside the braces is an ordinary
+expectation, which can be estimated on a mini-batch and differentiated. We treat $w$ as an
+additional trainable parameter, so that minimising~\eqref{eq:ru} jointly over the network weights
+and $w$ minimises the CVaR of the hedged position.
+
+\subsection{Indifference premium}
+
+CVaR is translation equivariant: increasing the premium by $\Delta p$ reduces CVaR by exactly
+$\Delta p$. The smallest premium at which the hedged position has non-positive CVaR is therefore
+\begin{equation}
+  p^\ast = p_0 + \CVaR_\alpha(L).
+\end{equation}
+A better hedge thus translates directly into a lower price that can be quoted for the same tail risk.
+
+%=====================================================================
+\section{Classical benchmarks}
+%=====================================================================
+
+\subsection{Black--Scholes delta hedging}
+
+The naive benchmark holds $\delta_k = \Delta(S_k, \tau_k)$ with $\tau_k = T - t_k$, regardless of
+costs. Without costs, its discrete hedging error decays as $1/\sqrt{N}$: the error per step has
+variance of order $\Delta t^2$ and the errors are approximately independent, so the total variance
+is of order $N \Delta t^2 = T^2/N$. With costs, the expected change of the delta per step is of order
+$\sqrt{\Delta t}$, so the turnover, and with it the trading cost, grows as
+$N\sqrt{\Delta t} = \sqrt{NT} \propto \sqrt{N}$. Rebalancing more often therefore stops paying off.
+
+Daily delta hedging already removes most of the risk of the short option: the P\&L standard
+deviation falls from $3.46$ (unhedged) to $0.36$.
+
+\maybefigure{../figures/pnl_hist_bs_vs_none.png}{0.8}{P\&L of the short call without hedging and with
+daily BS delta hedging ($c = 0$, $N = 30$, log scale). Unhedged, the gain is capped at the premium
+while losses are unbounded.}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{r cc cc cc}
+\toprule
+ & \multicolumn{2}{c}{$c = 0$} & \multicolumn{2}{c}{$c = 0.1\%$} & \multicolumn{2}{c}{$c = 1\%$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+$N$ & mean & std & mean & std & mean & std \\
+\midrule
+5   & 0.000 & 0.839 & $-0.112$ & 0.849 & $-1.114$ & 0.953 \\
+10  & 0.000 & 0.608 & $-0.147$ & 0.619 & $-1.451$ & 0.767 \\
+30  & 0.000 & 0.358 & $-0.222$ & 0.373 & $-2.224$ & 0.756 \\
+100 & 0.000 & 0.199 & $-0.367$ & 0.239 & $-3.679$ & 1.206 \\
+\bottomrule
+\end{tabular}
+\caption{Black--Scholes delta hedging versus the number of rebalancing dates $N$. Without costs,
+$\text{std}\cdot\sqrt{N} \approx 1.9$--$2.0$ is nearly constant. With 1\% costs, the mean loss at
+$N=100$ exceeds the option premium ($2.29$) and the risk increases again.}
+\end{table}
+
+\maybefigure{../figures/hedging_error_vs_N.png}{0.6}{Discrete hedging error of BS delta hedging
+without costs follows the $1/\sqrt{N}$ law.}
+
+\maybefigure{../figures/bs_hedging_costs.png}{0.95}{Risk (left) and mean P\&L (right) of BS delta
+hedging versus rebalancing frequency for three cost levels.}
+
+\subsection{Constant no-trade band}
+
+The classical response to proportional costs is a no-trade region around the delta. With
+half-width $h$, the position is only adjusted when it leaves the band, and then only to the nearest
+edge:
+\begin{equation}
+  \delta_k = \min\!\Big( \max\big( \delta_{k-1},\, \Delta_k - h \big),\, \Delta_k + h \Big).
+\end{equation}
+For $h = 0$ this is BS delta hedging. The width $h$ is tuned on the training paths to minimise
+$\CVaR_{95\%}$; the optimum is $h = 0.11$.
+
+\subsection{Whalley--Wilmott band}
+
+Asymptotic analysis for small costs~\cite{whalley1997} suggests a state-dependent half-width that
+scales with the option gamma:
+\begin{equation}
+  h_k = \kappa \,\big( c\, S_k\, \Gamma_k^2 \big)^{1/3},
+\end{equation}
+where all model constants (in particular risk aversion) are absorbed into the scale $\kappa$,
+which is again tuned on the training paths ($\kappa = 0.7$).
+
+%=====================================================================
+\section{Deep hedging}
+%=====================================================================
+
+\subsection{Policy}
+
+The hedging decision is a function of the observable state,
+\begin{equation}
+  \delta_k = f_\theta\big(x_{1,k},\, x_{2,k},\, \delta_{k-1}\big), \qquad
+  x_{1,k} = \frac{\log(S_k/K)}{\sigma\sqrt{T}}, \qquad x_{2,k} = \frac{\tau_k}{T},
+\end{equation}
+where $f_\theta$ is a multilayer perceptron $3 \to 32 \to 32 \to 1$ with ReLU activations
+(1{,}217 parameters). Inputs are normalised to order one; the first feature measures the moneyness
+in units of the total standard deviation, as in $d_1$. The current position $\delta_{k-1}$ is
+essential under costs: without it the policy cannot tell whether a trade is worth its cost.
+
+Because the position at day $k$ is an input at day $k+1$, the policy is rolled out sequentially
+over the $N$ dates, which makes the network recurrent. In the cost-free experiments the
+position input is omitted ($2 \to 32 \to 32 \to 1$, 1{,}185 parameters) and all dates are
+evaluated in a single forward pass.
+
+\subsection{Training}
+
+The policy is trained end-to-end through the simulator. At each iteration a mini-batch of
+$10{,}000$ paths is drawn, the policy is rolled out, the P\&L~\eqref{eq:pnl} is computed with
+differentiable tensor operations, and the loss~\eqref{eq:ru} (or the mean squared P\&L in the
+first experiment) is backpropagated through all $N$ decisions to the network weights and to $w$.
+We use Adam~\cite{kingma2015} with learning rate $10^{-3}$ for the network and $10^{-2}$ for $w$.
+
+\subsection{Why not a tree-based model}
+
+The problem has no labels: the optimal position at a given date is unknown, and the objective
+is defined on the whole trajectory, where each decision feeds into the next state. Training
+therefore requires a policy that is differentiable in its parameters, so that the gradient of
+the risk measure can be propagated through the simulator. Tree ensembles are piecewise constant
+and not differentiable in their parameters, so they do not fit this end-to-end formulation.
+The approach is closest to direct policy optimisation in reinforcement learning, with the
+difference that here the environment itself is differentiable and gradients are exact.
+
+%=====================================================================
+\section{Experiments}
+%=====================================================================
+
+\subsection{Without costs: recovering Black--Scholes}
+
+Trained on the mean squared P\&L, the network learns positions that differ from the Black--Scholes
+delta by $0.0086$ on average, out-of-sample. Its P\&L standard deviation is $0.369$ versus $0.358$
+for BS delta, and the results on training and test paths coincide, so the network has learned
+the hedging rule rather than memorising paths.
+
+\maybefigure{../figures/net_vs_bs_delta.png}{0.7}{Learned hedge ratio versus the Black--Scholes
+delta for several dates, without transaction costs.}
+
+\subsection{Without costs: CVaR versus variance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Strategy & std & $\CVaR_{95\%}$ \\
+\midrule
+BS delta            & \textbf{0.358} & 0.833 \\
+Network, MSE loss   & 0.369 & 0.844 \\
+Network, CVaR loss  & 0.409 & \textbf{0.739} \\
+\bottomrule
+\end{tabular}
+\caption{Out-of-sample comparison without transaction costs.}
+\end{table}
+
+Each strategy is best on the criterion it targets. The CVaR-trained network shortens the left
+tail by 11\% at the cost of a wider distribution: the Black--Scholes delta is close to
+variance-optimal but not tail-optimal.
+
+\maybefigure{../figures/pnl_bs_vs_cvar_net.png}{0.8}{P\&L distributions (log scale) of BS delta and
+the CVaR-trained network; dashed lines mark $-\VaR_{95\%}$.}
+
+\subsection{With 1\% transaction costs}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Strategy & mean P\&L & std & $\CVaR_{95\%}$ & turnover \\
+\midrule
+No hedge                               & $-0.02$ & 3.47 & 10.06 & 0.00 \\
+BS delta                               & $-2.22$ & 0.75 & 4.06 & 2.22 \\
+Constant band, $h = 0.11$              & $-1.04$ & 0.71 & 2.61 & 1.03 \\
+Whalley--Wilmott band, $\kappa = 0.7$  & $-1.04$ & 0.78 & 2.76 & 1.03 \\
+Network (5 seeds)                      & $-1.22 \pm 0.02$ & $\mathbf{0.65 \pm 0.01}$ & $\mathbf{2.40 \pm 0.02}$ & $\approx 1.3$ \\
+\bottomrule
+\end{tabular}
+\caption{Out-of-sample results with $c = 1\%$. Band parameters are tuned on the training paths;
+network results are mean $\pm$ standard deviation over five training seeds.}
+\end{table}
+
+\maybefigure{../figures/benchmark_comparison.png}{0.95}{Left: tuning of the constant band width on
+the training paths. Right: out-of-sample $\CVaR_{95\%}$ of all strategies; the error bar shows the
+seed-to-seed standard deviation of the network.}
+
+The main observations are:
+\begin{itemize}
+  \item Most of the improvement over BS delta comes from the no-trade principle itself: a constant
+        band with a single tuned parameter reduces $\CVaR_{95\%}$ by 36\%.
+  \item The network improves on the best classical benchmark by a further 8\% in $\CVaR_{95\%}$ and
+        9\% in standard deviation. The gap of $0.21$ is about twelve times the seed-to-seed standard
+        deviation, and every individual seed beats the band.
+  \item The network accepts a slightly larger mean loss than the band: it trades somewhat more
+        to cut the tail, which is consistent with its objective.
+  \item The Whalley--Wilmott band underperforms the constant band. It is derived for small costs
+        and utility maximisation; under a CVaR objective with 1\% costs its widening near expiry,
+        where the gamma of an at-the-money option explodes, leaves the position under-hedged exactly
+        when the tail outcome is decided.
+  \item The indifference premium for the same $\CVaR_{95\%}$ is $2.29 + 2.40 \approx 4.70$ for the
+        network versus $2.29 + 4.06 \approx 6.35$ for BS delta, so the option could be quoted about
+        26\% cheaper.
+\end{itemize}
+
+\subsection{What the network learned}
+
+Fixing the date and the price and varying only the current position reveals the learned trading
+rule. Unlike the BS delta, which jumps to the same target from any starting position, the learned
+rule has a slope well below one in the current position: the network moves only part of the way
+towards its target and spreads the adjustment over several days, which saves transaction costs.
+The fixed point of the rule, where no trade occurs, lies close to the BS delta for each price level.
+This partial rebalancing is a smooth approximation of the band structure of the theoretical
+solution rather than an exact flat no-trade region. Regions of the state space that are rarely
+visited during training, such as a zero position at $S = 105$ in mid-life, should be interpreted
+with caution.
+
+\maybefigure{../figures/no_trade_band.png}{0.6}{Learned trading rule at day 15 with $c = 1\%$:
+new position versus current position for three price levels. The diagonal corresponds to no
+trade; dotted lines show the BS delta.}
+
+%=====================================================================
+\section{Limitations and model risk}
+%=====================================================================
+
+\begin{itemize}
+  \item \textbf{Market dynamics.} Training and testing use geometric Brownian motion, which has
+        neither fat tails nor volatility clustering. Results on real markets may differ.
+  \item \textbf{Premium.} The option is sold at the frictionless Black--Scholes price rather than
+        at a market quote. Relative comparisons between strategies are unaffected, since the premium
+        is identical for all of them, but absolute profitability is not assessed.
+  \item \textbf{Frictions.} Costs are proportional and constant; there is no market impact and no
+        cost for unwinding at maturity.
+  \item \textbf{Scope.} A single at-the-money option with one maturity, hedged in the underlying only.
+\end{itemize}
+
+%=====================================================================
+\section{Next steps}
+%=====================================================================
+
+\begin{itemize}
+  \item Replace GBM by a block bootstrap of historical S\&P~500 returns (2005--2017), which preserves
+        fat tails and volatility clustering, and test on realised paths from 2018--2026.
+  \item Add an ex-ante volatility feature to the policy (trailing realised volatility, a GARCH(1,1)
+        forecast with parameters estimated on the training period only, or the VIX), and report
+        results by volatility regime and in historical stress windows.
+  \item Forecast VaR and ES of the hedged book with a neural quantile model and backtest it
+        (exceedance rate, Kupiec test) against historical simulation, linear quantile regression and
+        gradient boosting.
+\end{itemize}
+
+%=====================================================================
+\begin{thebibliography}{9}
+
+\bibitem{black1973}
+F.~Black and M.~Scholes.
+\newblock The pricing of options and corporate liabilities.
+\newblock \emph{Journal of Political Economy}, 81(3):637--654, 1973.
+
+\bibitem{buehler2019}
+H.~Buehler, L.~Gonon, J.~Teichmann, and B.~Wood.
+\newblock Deep hedging.
+\newblock \emph{Quantitative Finance}, 19(8):1271--1291, 2019.
+
+\bibitem{kingma2015}
+D.~P.~Kingma and J.~Ba.
+\newblock Adam: A method for stochastic optimization.
+\newblock In \emph{International Conference on Learning Representations}, 2015.
+
+\bibitem{leland1985}
+H.~E.~Leland.
+\newblock Option pricing and replication with transactions costs.
+\newblock \emph{The Journal of Finance}, 40(5):1283--1301, 1985.
+
+\bibitem{rockafellar2000}
+R.~T.~Rockafellar and S.~Uryasev.
+\newblock Optimization of conditional value-at-risk.
+\newblock \emph{Journal of Risk}, 2(3):21--41, 2000.
+
+\bibitem{whalley1997}
+A.~E.~Whalley and P.~Wilmott.
+\newblock An asymptotic analysis of an optimal hedging model for option pricing with transaction costs.
+\newblock \emph{Mathematical Finance}, 7(3):307--324, 1997.
+
+\end{thebibliography}
+
+\end{document}
