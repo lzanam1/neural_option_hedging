@@ -18,3 +18,7 @@ def bs_delta(S,K, tau, sigma):
     d1, d2 = d1_d2(S,K,tau,sigma)
     delta = norm.cdf(d1)
     return delta
+
+def bs_gamma(S, K, tau, sigma):
+    d1, d2 = d1_d2(S, K, tau, sigma)
+    return norm.pdf(d1) / (S * sigma * np.sqrt(tau))

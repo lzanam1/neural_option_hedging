@@ -1,6 +1,7 @@
 import numpy as np
 from src.black_scholes import bs_delta
 import torch
+from src.black_scholes import bs_delta,bs_gamma
 
 def compute_pnl(S, deltas, p0, K, c=0.0):
     payoff = np.maximum(0, S[:, -1] - K)
@@ -59,4 +60,23 @@ def band_strategy(S, K, T, sigma, h):
         deltas[:, k] = delta_k
         delta_prev = delta_k
 
+    return deltas
+
+def ww_band_strategy(S, K, T, sigma, kappa, c):
+    n_paths, n_points = S.shape
+    n_steps = n_points - 1
+    dt = T / n_steps
+    tau = T - np.arange(n_steps) * dt
+
+    S_dec = S[:, :-1]                                   # цены в моменты решений
+    bs = bs_delta(S_dec, K, tau, sigma)                 # центр полосы
+    gamma = bs_gamma(S_dec, K, tau, sigma)
+    h = kappa * (c * S_dec * gamma**2) ** (1 / 3)       # ширина своя для каждого пути и дня
+
+    deltas = np.zeros_like(bs)
+    delta_prev = np.zeros(n_paths)
+    for k in range(n_steps):
+        delta_k = np.clip(delta_prev, bs[:, k] - h[:, k], bs[:, k] + h[:, k])
+        deltas[:, k] = delta_k
+        delta_prev = delta_k
     return deltas
