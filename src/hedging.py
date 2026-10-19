@@ -45,3 +45,18 @@ def pnl_torch(S_b, deltas, p0, K, c):
     costs = (c * S_b[:, :-1] * torch.abs(deltas - prev)).sum(dim=1)
 
     return p0 - payoff + hedge_gain - costs
+
+def band_strategy(S, K, T, sigma, h):
+    n_paths, n_points = S.shape
+    n_steps = n_points - 1
+
+    bs = bs_delta_strategy(S, K, T, sigma)
+    deltas = np.zeros_like(bs)
+    delta_prev = np.zeros(n_paths)
+
+    for k in range(n_steps):
+        delta_k = np.clip(delta_prev, bs[:, k] - h, bs[:, k] + h)
+        deltas[:, k] = delta_k
+        delta_prev = delta_k
+
+    return deltas
